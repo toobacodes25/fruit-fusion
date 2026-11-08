@@ -1,0 +1,941 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Fruit Fusion</title>
+<style>
+  html, body { margin:0; height:100%; background:#7b4bb7; overflow:hidden; }
+  body { display:flex; justify-content:center; align-items:center; }
+  canvas { width:min(100vw, 56.25vh); height:auto; display:block; touch-action:none; box-shadow:0 0 20px rgba(0,0,0,0.35); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = 360, H = 640, S = 2, CX = 180;
+const LINE = 135, SPAWN_Y = 78;
+canvas.width = W * S; canvas.height = H * S;
+ctx.scale(S, S);
+
+// ---------- 20 FRUITS ----------
+const NAMES = [
+  ["🫒","Olive"],["🫐","Blueberry"],["🍒","Cherry"],["🍓","Strawberry"],
+  ["🍇","Grapes"],["🍋","Lemon"],["🥝","Kiwi"],["🍊","Orange"],
+  ["🍅","Tomato"],["🍎","Apple"],["🍏","Green Apple"],["🍐","Pear"],
+  ["🍑","Peach"],["🥑","Avocado"],["🍌","Banana"],["🥭","Mango"],
+  ["🍍","Pineapple"],["🥥","Coconut"],["🍈","Melon"],["🍉","Watermelon"]
+];
+const TYPES = NAMES.map((t, i) => ({ e: t[0], n: t[1], r: Math.round(9 + i * 2.9) }));
+const LAST = TYPES.length - 1;
+
+// ---------- Math helpers ----------
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeOut = t => 1 - Math.pow(1 - t, 3);
+const easeOutBack = t => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };
+function bounce(t) {
+  const n = 7.5625, d = 2.75;
+  if (t < 1 / d) return n * t * t;
+  if (t < 2 / d) { t -= 1.5 / d; return n * t * t + 0.75; }
+  if (t < 2.5 / d) { t -= 2.25 / d; return n * t * t + 0.9375; }
+  t -= 2.625 / d; return n * t * t + 0.984375;
+}
+const dist = (a, b, c, d) => Math.hypot(a - c, b - d);
+
+// ---------- Game cherry background ----------
+const bg = document.createElement("canvas");
+bg.width = W * S; bg.height = H * S;
+(function makeBg() {
+  const b = bg.getContext("2d");
+  b.scale(S, S);
+  b.fillStyle = "#ffd9e0";
+  b.fillRect(0, 0, W, H);
+  b.font = "34px Arial";
+  b.textAlign = "center";
+  b.textBaseline = "middle";
+  b.globalAlpha = 0.35;
+  let row = 0;
+  for (let y = 30; y < H + 40; y += 60) {
+    const off = (row % 2) * 40;
+    for (let x = -10 + off; x < W + 40; x += 80) b.fillText("🍒", x, y);
+    row++;
+  }
+})();
+
+// =====================================================
+//                       SOUND
+// =====================================================
+let actx = null, unlocked = false;
+let musicOn = true, voiceOn = true;
+let musicTimer = null, step = 0;
+
+const SRC1 = t => "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en&q=" + encodeURIComponent(t);
+const SRC2 = t => "https://api.streamelements.com/kappa/v2/speech?voice=Brian&text=" + encodeURIComponent(t);
+
+const clips = {};
+const loadQueue = [];
+
+function makeClip(text) {
+  const a = new Audio();
+  a.preload = "auto";
+  a.dataset.src = "0";
+  a.onerror = () => {
+    if (a.dataset.src === "0") {
+      a.dataset.src = "1";
+      a.src = SRC2(text);
+      a.load();
+    } else {
+      a.dataset.bad = "1";
+    }
+  };
+  a.src = SRC1(text);
+  clips[text] = a;
+  // chupke se load (awaaz nahi aayegi)
+  a.muted = true;
+  const p = a.play();
+  if (p && p.then) {
+    p.then(() => { a.pause(); a.currentTime = 0; a.muted = false; })
+     .catch(() => { a.muted = false; });
+  } else { a.muted = false; }
+  return a;
+}
+
+function unlockSound() {
+  if (unlocked) return;
+  unlocked = true;
+  try {
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    actx.resume();
+  } catch (e) {}
+  try {
+    const u = new SpeechSynthesisUtterance(" ");
+    u.volume = 0;
+    speechSynthesis.speak(u);
+    speechSynthesis.getVoices();
+  } catch (e) {}
+
+  // Awaazein EK EK karke load hongi (saath mein nahi)
+  ["Let's play!", "Welcome to Fruit Fusion"].concat(TYPES.map(t => t.n), ["Game over"])
+    .forEach(t => loadQueue.push(t));
+  setInterval(() => {
+    const t = loadQueue.shift();
+    if (t && !clips[t]) makeClip(t);
+  }, 700);
+}
+
+function tone(f1, f2, dur, type, vol, attack) {
+  if (!actx) return;
+  try {
+    const t = actx.currentTime;
+    const o = actx.createOscillator();
+    const g = actx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f1, t);
+    if (f2 !== f1) o.frequency.exponentialRampToValueAtTime(f2, t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(vol, t + (attack || 0.01));
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(actx.destination);
+    o.start(t); o.stop(t + dur + 0.05);
+  } catch (e) {}
+}
+
+function dropSound()  { tone(600, 150, 0.18, "sine", 0.5, 0.005); }
+function mergeChime() { tone(500, 900, 0.15, "triangle", 0.35, 0.005); }
+function whoosh() {
+  tone(250, 1400, 0.4, "sine", 0.25, 0.01);
+  tone(400, 1800, 0.35, "triangle", 0.1, 0.01);
+  [784, 988, 1175, 1568].forEach((f, i) => setTimeout(() => tone(f, f, 0.4, "sine", 0.15, 0.01), 120 + i * 90));
+}
+
+// Soft lullaby tune
+const MELODY = [
+  523, 659, 784, 659,  587, 698, 880, 698,
+  523, 659, 784, 1047, 784, 659, 587, 523,
+  440, 523, 659, 523,  494, 587, 784, 587,
+  523, 659, 784, 659,  523, 0,   0,   0
+];
+const BASS = [131, 131, 175, 175, 131, 131, 196, 196];
+function musicStep() {
+  if (!actx || !musicOn) return;
+  const f = MELODY[step % MELODY.length];
+  if (f) tone(f, f, 0.9, "sine", 0.05, 0.08);
+  if (step % 4 === 0) {
+    const b = BASS[Math.floor(step / 4) % BASS.length];
+    tone(b, b, 1.8, "sine", 0.05, 0.1);
+  }
+  step++;
+}
+function startMusic() {
+  if (musicTimer) return;
+  musicTimer = setInterval(musicStep, 480);
+}
+
+function playClip(text) {
+  let a = clips[text];
+  if (!a || a.dataset.bad === "1") a = makeClip(text);
+  try {
+    a.muted = false;
+    a.volume = 1;
+    a.currentTime = 0;
+    const p = a.play();
+    if (p && p.catch) {
+      p.catch(() => {
+        // dusri awaaz try karo
+        const b = new Audio(a.dataset.src === "0" ? SRC2(text) : SRC1(text));
+        b.play().catch(() => {});
+      });
+    }
+  } catch (e) {}
+}
+
+function speakPhrase(text) {
+  if (!voiceOn) return;
+  let started = false;
+  try {
+    if (!("speechSynthesis" in window)) { playClip(text); return; }
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "en-US";
+    u.rate = 0.85;
+    u.pitch = 1.2;
+    u.volume = 1;
+    u.onstart = () => { started = true; };
+    speechSynthesis.speak(u);
+    setTimeout(() => { if (!started) playClip(text); }, 600);
+  } catch (e) {
+    playClip(text);
+  }
+}
+  // =====================================================
+//                CUTE FRUIT DRAWING
+// =====================================================
+function face(x, y, r, happy) {
+  const ex = r * 0.32, ey = -r * 0.05, er = r * 0.1;
+  ctx.save();
+  ctx.fillStyle = "#3b1f2b"; ctx.strokeStyle = "#3b1f2b"; ctx.lineCap = "round";
+  if (happy) {
+    ctx.lineWidth = Math.max(2, r * 0.08);
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      ctx.arc(x + s * ex, y + ey + er * 0.6, er * 1.3, Math.PI * 1.1, Math.PI * 1.9);
+      ctx.stroke();
+    }
+  } else {
+    for (const s of [-1, 1]) {
+      ctx.fillStyle = "#3b1f2b";
+      ctx.beginPath(); ctx.ellipse(x + s * ex, y + ey, er, er * 1.3, 0, 0, 7); ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.beginPath(); ctx.arc(x + s * ex - er * 0.3, y + ey - er * 0.45, er * 0.4, 0, 7); ctx.fill();
+    }
+  }
+  ctx.fillStyle = "rgba(255,90,130,0.45)";
+  for (const s of [-1, 1]) {
+    ctx.beginPath(); ctx.ellipse(x + s * r * 0.55, y + r * 0.2, r * 0.15, r * 0.09, 0, 0, 7); ctx.fill();
+  }
+  if (happy) {
+    ctx.fillStyle = "#e0405a";
+    ctx.beginPath(); ctx.arc(x, y + r * 0.13, r * 0.16, 0, Math.PI); ctx.closePath(); ctx.fill();
+  } else {
+    ctx.lineWidth = Math.max(1.5, r * 0.06);
+    ctx.beginPath(); ctx.arc(x, y + r * 0.1, r * 0.14, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function ball(x, y, r, c1, c2) {
+  const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.35, r * 0.1, x, y, r);
+  g.addColorStop(0, c1); g.addColorStop(1, c2);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+  ctx.lineWidth = Math.max(1.5, r * 0.05);
+  ctx.strokeStyle = "rgba(90,30,40,0.35)"; ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,0.5)";
+  ctx.beginPath(); ctx.ellipse(x - r * 0.45, y - r * 0.5, r * 0.15, r * 0.08, -0.6, 0, 7); ctx.fill();
+}
+
+function leaf(x, y, r, ang) {
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(ang);
+  ctx.fillStyle = "#5cc84a"; ctx.strokeStyle = "#2f7d2a";
+  ctx.lineWidth = Math.max(1, r * 0.05);
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.quadraticCurveTo(r * 0.5, -r * 0.45, r, -r * 0.05);
+  ctx.quadraticCurveTo(r * 0.5, r * 0.3, 0, 0);
+  ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+
+function stem(r, curve) {
+  ctx.strokeStyle = curve ? "#6b8f2a" : "#7a4a1a";
+  ctx.lineWidth = Math.max(2, r * 0.1); ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(0, -r * 0.95);
+  if (curve) ctx.quadraticCurveTo(r * 0.1, -r * 1.5, r * 0.6, -r * 1.6);
+  else ctx.lineTo(r * 0.08, -r * 1.25);
+  ctx.stroke();
+}
+
+function kawaii(type, x, y, r, rot, happy) {
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(rot || 0);
+  switch (type) {
+    case "orange":
+      stem(r, false); leaf(r * 0.08, -r * 1.2, r * 0.6, -0.3);
+      ball(0, 0, r, "#ffc04d", "#ff8a1e"); face(0, r * 0.1, r, happy); break;
+    case "cherry":
+      stem(r, true); leaf(r * 0.55, -r * 1.6, r * 0.7, -0.2);
+      ball(0, 0, r, "#ff6b6b", "#d81b3b"); face(0, r * 0.1, r, happy); break;
+    case "blueberry":
+      ball(0, 0, r, "#8c98ff", "#3b3fb8");
+      ctx.fillStyle = "#2a2d8a"; ctx.beginPath(); ctx.arc(0, -r * 0.82, r * 0.2, 0, 7); ctx.fill();
+      leaf(r * 0.1, -r * 0.95, r * 0.5, -0.5);
+      face(0, r * 0.12, r, happy); break;
+    case "apple":
+      stem(r, false); leaf(r * 0.08, -r * 1.2, r * 0.6, -0.3);
+      ball(0, 0, r, "#d2f77a", "#6cc72f"); face(0, r * 0.1, r, happy); break;
+    case "peach":
+      stem(r, false); leaf(r * 0.08, -r * 1.2, r * 0.6, -0.3);
+      ball(0, 0, r, "#ffe0b5", "#ff8f6b"); face(0, r * 0.1, r, happy); break;
+    case "strawberry": {
+      const g = ctx.createLinearGradient(0, -r, 0, r);
+      g.addColorStop(0, "#ff7a7a"); g.addColorStop(1, "#e8283e");
+      ctx.fillStyle = g; ctx.strokeStyle = "rgba(120,20,30,0.4)"; ctx.lineWidth = Math.max(1.5, r * 0.05);
+      ctx.beginPath();
+      ctx.moveTo(0, r * 1.05);
+      ctx.bezierCurveTo(-r * 1.35, r * 0.35, -r * 1.15, -r * 0.85, 0, -r * 0.65);
+      ctx.bezierCurveTo(r * 1.15, -r * 0.85, r * 1.35, r * 0.35, 0, r * 1.05);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#ffe27a";
+      for (const p of [[-.62,0],[.62,0],[-.38,.5],[.38,.5],[-.72,-.32],[.72,-.32],[0,.75]]) {
+        ctx.beginPath(); ctx.ellipse(p[0] * r, p[1] * r, r * 0.04, r * 0.07, 0, 0, 7); ctx.fill();
+      }
+      for (let i = -2; i <= 2; i++) leaf(0, -r * 0.62, r * 0.55, -Math.PI / 2 + i * 0.55);
+      face(0, r * 0.05, r * 0.9, happy); break;
+    }
+    case "pineapple": {
+      for (let i = -2; i <= 2; i++) leaf(0, -r * 0.85, r * 0.9, -Math.PI / 2 + i * 0.45);
+      const g = ctx.createLinearGradient(0, -r, 0, r);
+      g.addColorStop(0, "#ffe066"); g.addColorStop(1, "#ffa820");
+      ctx.fillStyle = g; ctx.strokeStyle = "rgba(150,80,0,0.45)"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.ellipse(0, 0, r * 0.85, r, 0, 0, 7); ctx.fill(); ctx.stroke();
+      ctx.save(); ctx.clip();
+      ctx.strokeStyle = "rgba(190,110,0,0.35)"; ctx.lineWidth = 1.5;
+      for (let i = -6; i <= 6; i++) {
+        ctx.beginPath(); ctx.moveTo(i * r * 0.3, -r); ctx.lineTo(i * r * 0.3 + r * 0.9, r); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(i * r * 0.3, -r); ctx.lineTo(i * r * 0.3 - r * 0.9, r); ctx.stroke();
+      }
+      ctx.restore();
+      face(0, r * 0.05, r * 0.9, happy); break;
+    }
+    case "grapes": {
+      ctx.strokeStyle = "#6b8f2a"; ctx.lineWidth = Math.max(2, r * 0.1); ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(0, -r * 0.7); ctx.lineTo(r * 0.1, -r * 1.2); ctx.stroke();
+      leaf(r * 0.1, -r * 1.15, r * 0.7, -0.5);
+      for (const p of [[-.6,-.35],[0,-.4],[.6,-.35],[-.32,.1],[.32,.1],[0,.6]]) {
+        ball(p[0] * r, p[1] * r, r * 0.42, "#c19bff", "#6b2fc9");
+      }
+      face(0, -r * 0.05, r * 0.8, happy); break;
+    }
+    case "melon": {
+      ctx.translate(0, -r * 0.1);
+      ctx.fillStyle = "#58c43f";
+      ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#fff2c2";
+      ctx.beginPath(); ctx.arc(0, 0, r * 0.88, 0, Math.PI); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#ff5a6e";
+      ctx.beginPath(); ctx.arc(0, 0, r * 0.8, 0, Math.PI); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#3b1f2b";
+      for (const p of [[-.5,.3],[.5,.3],[-.25,.62],[.25,.62],[0,.25]]) {
+        ctx.beginPath(); ctx.ellipse(p[0] * r, p[1] * r, r * 0.04, r * 0.07, 0, 0, 7); ctx.fill();
+      }
+      face(0, r * 0.2, r * 0.7, happy); break;
+    }
+  }
+  ctx.restore();
+}
+
+function sparkle(x, y, s, col) {
+  ctx.fillStyle = col;
+  ctx.beginPath();
+  for (let i = 0; i < 8; i++) {
+    const a = i * Math.PI / 4 - Math.PI / 2;
+    const rr = i % 2 ? s * 0.28 : s;
+    ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+  }
+  ctx.closePath(); ctx.fill();
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function crown(x, y, s) {
+  ctx.save();
+  ctx.translate(x, y); ctx.scale(s, s);
+  ctx.fillStyle = "#ffd23f"; ctx.strokeStyle = "#7a4a00"; ctx.lineWidth = 3; ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(-34, 22); ctx.lineTo(-38, -10); ctx.lineTo(-18, 6); ctx.lineTo(0, -20);
+  ctx.lineTo(18, 6); ctx.lineTo(38, -10); ctx.lineTo(34, 22); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  for (const p of [[-38, -12], [0, -22], [38, -12]]) {
+    ctx.beginPath(); ctx.arc(p[0], p[1], 6, 0, 7); ctx.fill(); ctx.stroke();
+  }
+  ctx.fillStyle = "#ff5a7a";
+  ctx.beginPath(); ctx.arc(0, 12, 4.5, 0, 7); ctx.fill();
+  ctx.restore();
+      }
+ // =====================================================
+//                  START SCREEN
+// =====================================================
+let tick = 0;
+let SK = 0;                       // scatter amount (launch animation)
+const fx = x => x + (x - CX) * SK * 3;
+const fy = y => y + (y - 330) * SK * 3;
+
+const HY = 372, HR = 52;
+
+const clouds = [
+  { x: 40, y: 120, s: 1.0, sp: 0.12 }, { x: 260, y: 60, s: 1.3, sp: 0.08 },
+  { x: 300, y: 330, s: 0.9, sp: 0.1 }, { x: 60, y: 420, s: 1.2, sp: 0.07 },
+  { x: 220, y: 560, s: 1.1, sp: 0.09 }
+];
+const stars = [];
+for (let i = 0; i < 18; i++) stars.push({ x: Math.random() * W, y: Math.random() * 480, s: 4 + Math.random() * 6, ph: Math.random() * 6.28 });
+
+const floaters = [];
+for (let i = 0; i < 9; i++) {
+  floaters.push({
+    type: ["cherry", "strawberry", "orange"][i % 3],
+    bx: 25 + Math.random() * 310, y: Math.random() * H,
+    r: 11 + Math.random() * 7, sp: 0.25 + Math.random() * 0.35, ph: Math.random() * 6.28
+  });
+}
+
+const corners = [
+  ["grapes", 62, 72, 34, -0.1], ["melon", 318, 112, 42, 0.25],
+  ["cherry", 36, 285, 24, 0], ["blueberry", 326, 292, 26, 0],
+  ["pineapple", 30, 482, 40, 0.1], ["apple", 324, 492, 34, -0.1]
+];
+
+function drawCloud(c) {
+  c.x += c.sp; if (c.x > W + 80) c.x = -80;
+  ctx.fillStyle = "rgba(255,255,255,0.55)";
+  const x = fx(c.x), y = fy(c.y), s = c.s;
+  for (const p of [[0,0,28],[28,-8,34],[60,0,28],[30,10,30]]) {
+    ctx.beginPath(); ctx.arc(x + p[0] * s, y + p[1] * s, p[2] * s, 0, 7); ctx.fill();
+  }
+}
+
+function drawRays() {
+  ctx.save();
+  ctx.translate(fx(CX), fy(HY));
+  ctx.rotate(tick / 300);
+  ctx.fillStyle = "rgba(255,245,180,0.2)";
+  for (let i = 0; i < 12; i++) {
+    const a = i * Math.PI / 6;
+    ctx.beginPath(); ctx.moveTo(0, 0);
+    ctx.lineTo(Math.cos(a) * 280, Math.sin(a) * 280);
+    ctx.lineTo(Math.cos(a + 0.18) * 280, Math.sin(a + 0.18) * 280);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+
+let lastHeroT = 0;
+function drawHero() {
+  const ts = tick;
+  const t = ts % 330;
+  const wob = Math.sin(ts / 9) * 0.06;
+  if (lastHeroT < 112 && t >= 112 && state === "start") mergeChime();
+  lastHeroT = t;
+
+  if (t < 95) {
+    const k = easeOut(t / 95);
+    const lx = lerp(-70, CX - HR * 0.92, k), rx = lerp(W + 70, CX + HR * 0.92, k);
+    kawaii("strawberry", fx(lx), fy(HY + Math.sin(ts / 10) * 4), HR, wob - (1 - k) * 0.6 + SK * 5, true);
+    kawaii("orange", fx(rx), fy(HY + Math.sin(ts / 10 + 1) * 4), HR, -wob + (1 - k) * 0.6 + SK * 5, true);
+  } else if (t < 112) {
+    const k = (t - 95) / 17;
+    const o = HR * 0.92 * (1 - k * 0.7);
+    const sq = HR * (1 + Math.sin(k * Math.PI) * 0.12);
+    kawaii("strawberry", fx(CX - o), fy(HY), sq, SK * 5, true);
+    kawaii("orange", fx(CX + o), fy(HY), sq, SK * 5, true);
+  } else if (t < 255) {
+    const m = t - 112;
+    const sc = easeOutBack(Math.min(1, m / 28));
+    const R = HR * 1.6 * sc;
+    const bob = Math.sin(ts / 12) * 5;
+    if (m < 30) {
+      ctx.save();
+      ctx.globalAlpha *= 1 - m / 30;
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 6;
+      ctx.beginPath(); ctx.arc(fx(CX), fy(HY), m * 7, 0, 7); ctx.stroke();
+      for (let i = 0; i < 10; i++) {
+        const a = i * Math.PI / 5;
+        sparkle(fx(CX) + Math.cos(a) * m * 6, fy(HY) + Math.sin(a) * m * 6, 10, "#fff6a8");
+      }
+      ctx.restore();
+    }
+    kawaii("peach", fx(CX), fy(HY + bob), R, Math.sin(ts / 15) * 0.05 + SK * 5, true);
+    for (let i = 0; i < 6; i++) {
+      const a = ts / 30 + i * 1.05;
+      const d = R * 1.3;
+      sparkle(fx(CX + Math.cos(a) * d), fy(HY + bob + Math.sin(a) * d * 0.8), 6 + 3 * Math.sin(ts / 8 + i), "#fff3a0");
+    }
+  } else {
+    const k = (t - 255) / 75;
+    ctx.save();
+    ctx.globalAlpha *= 1 - k;
+    kawaii("peach", fx(CX), fy(HY), HR * 1.6 * (1 - k * 0.4), SK * 5, true);
+    ctx.restore();
+  }
+}
+
+function drawHills() {
+  ctx.fillStyle = "#7ed957";
+  ctx.beginPath(); ctx.ellipse(CX, H + 70, 270, 120, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = "#6bc84a";
+  ctx.beginPath(); ctx.ellipse(CX, H + 85, 230, 100, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = "#3f9f3a";
+  for (const p of [[18, H - 28, 38], [62, H - 14, 28], [345, H - 36, 42], [300, H - 16, 30]]) {
+    ctx.beginPath(); ctx.arc(p[0], p[1], p[2], 0, 7); ctx.fill();
+  }
+  ctx.fillStyle = "#4fb34a";
+  for (const p of [[30, H - 40, 26], [335, H - 52, 28]]) {
+    ctx.beginPath(); ctx.arc(p[0], p[1], p[2], 0, 7); ctx.fill();
+  }
+  for (const p of [[44, H - 52], [320, H - 66]]) {
+    ctx.fillStyle = "#fff";
+    for (let i = 0; i < 5; i++) {
+      const a = i * Math.PI * 2 / 5;
+      ctx.beginPath(); ctx.arc(p[0] + Math.cos(a) * 6, p[1] + Math.sin(a) * 6, 5, 0, 7); ctx.fill();
+    }
+    ctx.fillStyle = "#ffd23f";
+    ctx.beginPath(); ctx.arc(p[0], p[1], 4, 0, 7); ctx.fill();
+  }
+}
+
+function drawTitle(k) {
+  const ts = tick;
+  const kk = Math.min(1, ts / 70);
+  const by = (1 - bounce(kk)) * -300;
+  const idle = ts > 70 ? Math.sin(ts / 25) * 3 : 0;
+  const sc = (ts > 70 ? 1 + Math.sin(ts / 25) * 0.015 : 1) * (1 - k * 0.6);
+  ctx.save();
+  ctx.globalAlpha *= Math.min(1, ts / 12) * Math.max(0, 1 - k * 1.3);
+  ctx.translate(CX, 0);
+  ctx.scale(sc, sc);
+  ctx.translate(0, by + idle);
+
+  // orbit ring
+  ctx.save();
+  ctx.translate(0, 185); ctx.rotate(-0.08);
+  ctx.strokeStyle = "rgba(255,230,110,0.85)"; ctx.lineWidth = 4;
+  ctx.shadowColor = "#ffe066"; ctx.shadowBlur = 10;
+  ctx.setLineDash([60, 24]); ctx.lineDashOffset = -ts * 1.5;
+  ctx.beginPath(); ctx.ellipse(0, 0, 172, 48, 0, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+
+  leaf(-95, 118, 55, -2.6 + Math.sin(ts / 30) * 0.05);
+  leaf(95, 112, 55, -0.5 - Math.sin(ts / 30) * 0.05);
+  crown(0, 62, 1);
+
+  ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.lineJoin = "round";
+  ctx.font = 'bold 70px "Arial Black", "Arial Rounded MT Bold", Arial, sans-serif';
+  let g = ctx.createLinearGradient(0, 95, 0, 160);
+  g.addColorStop(0, "#fff176"); g.addColorStop(1, "#ffa000");
+  ctx.lineWidth = 14; ctx.strokeStyle = "#6a2c5a";
+  ctx.strokeText("Fruit", 0, 128);
+  ctx.fillStyle = g; ctx.fillText("Fruit", 0, 128);
+
+  ctx.font = 'bold 64px "Arial Black", "Arial Rounded MT Bold", Arial, sans-serif';
+  g = ctx.createLinearGradient(0, 165, 0, 230);
+  g.addColorStop(0, "#ffb3e6"); g.addColorStop(1, "#ff3fa8");
+  ctx.strokeStyle = "#6a2c5a";
+  ctx.strokeText("Fusion", 0, 196);
+  ctx.fillStyle = g; ctx.fillText("Fusion", 0, 196);
+  ctx.restore();
+
+  // Lakdi ka board
+  const bk = Math.max(0, Math.min(1, (ts - 40) / 25));
+  if (bk > 0) {
+    ctx.save();
+    ctx.globalAlpha *= Math.max(0, 1 - k * 1.3);
+    ctx.translate(CX, 252 + idle * 0.5);
+    ctx.scale(easeOutBack(bk) * (1 - k * 0.6), easeOutBack(bk) * (1 - k * 0.6));
+    const wg = ctx.createLinearGradient(0, -20, 0, 20);
+    wg.addColorStop(0, "#e8b878"); wg.addColorStop(1, "#c07f3a");
+    ctx.fillStyle = wg; ctx.strokeStyle = "#8a5320"; ctx.lineWidth = 3;
+    roundRect(-130, -20, 260, 40, 10); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = "#8a5320";
+    for (const x of [-118, 118]) { ctx.beginPath(); ctx.arc(x, 0, 3, 0, 7); ctx.fill(); }
+    ctx.fillStyle = "#5a3412";
+    ctx.font = 'italic bold 16px Arial, sans-serif';
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("Merge \u2022 Match \u2022 Discover \u2665", 0, 1);
+    ctx.restore();
+  }
+}
+
+function drawPlayButton(k) {
+  const pulse = 0.5 + 0.5 * Math.sin(tick / 18);
+  ctx.save();
+  ctx.globalAlpha *= Math.max(0, 1 - k * 1.3);
+  ctx.translate(CX, 512);
+  const sc = (1 + Math.sin(tick / 18) * 0.03) * (1 - k * 0.6);
+  ctx.scale(sc, sc);
+
+  // side dashes
+  ctx.strokeStyle = "#ffd23f"; ctx.lineWidth = 4; ctx.lineCap = "round";
+  ctx.globalAlpha *= 0.6 + 0.4 * pulse;
+  for (const s of [-1, 1]) {
+    for (const a of [-0.5, 0, 0.5]) {
+      ctx.beginPath();
+      ctx.moveTo(s * 108, a * 30);
+      ctx.lineTo(s * 122, a * 30 + a * 14);
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = Math.max(0, 1 - k * 1.3);
+
+  // glow
+  ctx.shadowColor = "rgba(200,255,100,0.95)";
+  ctx.shadowBlur = 12 + 16 * pulse;
+  const bgG = ctx.createLinearGradient(0, -31, 0, 31);
+  bgG.addColorStop(0, "#b4f55a"); bgG.addColorStop(1, "#4cbf1e");
+  ctx.fillStyle = bgG;
+  roundRect(-95, -31, 190, 62, 31); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.lineWidth = 4; ctx.strokeStyle = "#2f7d12"; ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,0.3)";
+  roundRect(-80, -26, 160, 20, 10); ctx.fill();
+
+  // play triangle
+  ctx.fillStyle = "#fff";
+  ctx.beginPath(); ctx.moveTo(-62, -17); ctx.lineTo(-62, 17); ctx.lineTo(-34, 0); ctx.closePath(); ctx.fill();
+
+  ctx.font = 'bold 38px "Arial Black", Arial, sans-serif';
+  ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.lineJoin = "round";
+  ctx.lineWidth = 6; ctx.strokeStyle = "#2f7d12";
+  ctx.strokeText("Play", 22, 2);
+  ctx.fillStyle = "#fff"; ctx.fillText("Play", 22, 2);
+  ctx.restore();
+}
+
+function icon(x, y, glyph, off) {
+  ctx.save();
+  ctx.fillStyle = "#a56bff"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(x, y, 18, 0, 7); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = "#fff"; ctx.font = "bold 20px Arial";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(glyph, x, y + 1);
+  if (off) {
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(x - 12, y - 12); ctx.lineTo(x + 12, y + 12); ctx.stroke();
+  }
+  ctx.restore();
+}
+const ICON_M = { x: W - 28, y: 30 }, ICON_G = { x: W - 70, y: 30 };
+function drawIcons() {
+  icon(ICON_G.x, ICON_G.y, "\u2699\uFE0E", !voiceOn);
+  icon(ICON_M.x, ICON_M.y, "\u266A", !musicOn);
+}
+
+function drawStart(k) {
+  SK = k * k;
+  if (k > 0) drawGame();   // neeche game dikhega
+
+  ctx.save();
+  ctx.globalAlpha = 1 - k;
+  const sh = Math.sin(tick / 200) * 0.05;
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#b085ff");
+  g.addColorStop(Math.max(0.2, 0.4 + sh), "#e19cf3");
+  g.addColorStop(Math.min(0.9, 0.72 - sh), "#ffbfe0");
+  g.addColorStop(1, "#ffe6c9");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = 1 - SK;
+  for (const c of clouds) drawCloud(c);
+  for (const s of stars) {
+    const tw = 0.6 + 0.4 * Math.sin(tick / 15 + s.ph);
+    sparkle(fx(s.x), fy(s.y), s.s * tw, "rgba(255,240,150,0.95)");
+  }
+  drawRays();
+  ctx.restore();
+
+  // tairte hue chhote fruits
+  ctx.save();
+  ctx.globalAlpha = (1 - SK) * 0.8;
+  for (const f of floaters) {
+    f.y -= f.sp;
+    if (f.y < -30) { f.y = H + 30; f.bx = 25 + Math.random() * 310; }
+    const x = f.bx + Math.sin(tick / 60 + f.ph) * 16;
+    kawaii(f.type, fx(x), fy(f.y), f.r, Math.sin(tick / 40 + f.ph) * 0.3 + SK * 6, false);
+  }
+  ctx.restore();
+
+  // kone ke cute fruits
+  ctx.save();
+  ctx.globalAlpha = 1 - SK;
+  corners.forEach((c, i) => {
+    const y = c[2] + Math.sin(tick / 45 + i) * 6;
+    kawaii(c[0], fx(c[1]), fy(y), c[3], c[4] + Math.sin(tick / 60 + i) * 0.08 + SK * 6, i % 2 === 0);
+  });
+  ctx.restore();
+
+  // beech ke do fruits
+  ctx.save();
+  ctx.globalAlpha = 1 - SK;
+  drawHero();
+  ctx.restore();
+
+  // pahaadi aur jhaadiyan
+  ctx.save();
+  ctx.globalAlpha = 1 - k;
+  drawHills();
+  ctx.restore();
+
+  drawTitle(k);
+  drawPlayButton(k);
+
+  ctx.save();
+  ctx.globalAlpha = 1 - k;
+  drawIcons();
+  ctx.restore();
+  }
+// =====================================================
+//                    GAME STATE
+// =====================================================
+let state = "start";     // start, launch, play, over
+let launchT = 0;
+const LAUNCH = 55;
+let welcomed = false;
+let ignoreUp = false;
+let fruits, cur, canDrop, score, popups;
+
+function newFruit() { return { x: 180, l: Math.floor(Math.random() * 5) }; }
+function reset() {
+  fruits = []; popups = [];
+  cur = newFruit(); canDrop = true; score = 0;
+}
+reset();
+
+function pointer(e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * W / rect.width,
+    y: (e.clientY - rect.top) * H / rect.height
+  };
+}
+
+function moveFruit(e) {
+  if (state !== "play" || !canDrop) return;
+  const p = pointer(e);
+  const r = TYPES[cur.l].r;
+  cur.x = Math.max(r, Math.min(W - r, p.x));
+}
+
+function startGame() {
+  state = "launch";
+  launchT = 0;
+  startMusic();
+  whoosh();
+  speakPhrase("Let's play!");
+  reset();
+}
+
+canvas.addEventListener("pointerdown", e => {
+  unlockSound();
+  const p = pointer(e);
+
+  if (dist(p.x, p.y, ICON_M.x, ICON_M.y) < 24) {
+    musicOn = !musicOn;
+    if (musicOn) startMusic();
+    ignoreUp = true; return;
+  }
+  if (dist(p.x, p.y, ICON_G.x, ICON_G.y) < 24) {
+    voiceOn = !voiceOn;
+    ignoreUp = true; return;
+  }
+
+  if (state === "start") {
+    const onPlay = Math.abs(p.x - CX) < 110 && Math.abs(p.y - 512) < 42;
+    if (onPlay) {
+      startGame();
+    } else if (!welcomed) {
+      welcomed = true;
+      startMusic();
+      speakPhrase("Welcome to Fruit Fusion");
+    }
+    ignoreUp = true; return;
+  }
+  if (state === "launch") { ignoreUp = true; return; }
+  if (state === "over") {
+    reset(); state = "play"; ignoreUp = true; return;
+  }
+  moveFruit(e);
+});
+canvas.addEventListener("pointermove", moveFruit);
+canvas.addEventListener("pointerup", () => {
+  if (ignoreUp) { ignoreUp = false; return; }
+  if (state !== "play" || !canDrop) return;
+  fruits.push({ x: cur.x, y: SPAWN_Y, vx: 0, vy: 0, l: cur.l, age: 0, dead: false });
+  canDrop = false;
+  dropSound();
+  setTimeout(() => { cur = newFruit(); canDrop = true; }, 500);
+});
+
+// =====================================================
+//                      UPDATE
+// =====================================================
+function update() {
+  tick++;
+
+  if (state === "play") {
+    for (const f of fruits) {
+      const r = TYPES[f.l].r;
+      f.age++;
+      f.vy += 0.35;
+      f.vx *= 0.99;
+      f.x += f.vx;
+      f.y += f.vy;
+      if (f.x - r < 0) { f.x = r; f.vx *= -0.3; }
+      if (f.x + r > W) { f.x = W - r; f.vx *= -0.3; }
+      if (f.y + r > H) { f.y = H - r; f.vy *= -0.2; f.vx *= 0.95; }
+    }
+
+    const born = [];
+    for (let i = 0; i < fruits.length; i++) {
+      for (let j = i + 1; j < fruits.length; j++) {
+        const a = fruits[i], b = fruits[j];
+        if (a.dead || b.dead) continue;
+        const ra = TYPES[a.l].r, rb = TYPES[b.l].r;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+        if (d < ra + rb) {
+          if (a.l === b.l && a.l < LAST) {
+            a.dead = b.dead = true;
+            const nl = a.l + 1;
+            const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+            born.push({ x: mx, y: my, vx: 0, vy: 0, l: nl, age: 0, dead: false });
+            score += (nl + 1) * 10;
+            mergeChime();
+            speakPhrase(TYPES[nl].n);
+            popups.push({ text: TYPES[nl].n + "!", x: mx, y: my, t: 0 });
+          } else {
+            const nx = dx / d, ny = dy / d;
+            const push = (ra + rb - d) / 2;
+            a.x -= nx * push; a.y -= ny * push;
+            b.x += nx * push; b.y += ny * push;
+            const rel = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+            if (rel < 0) {
+              a.vx += nx * rel * 0.5; a.vy += ny * rel * 0.5;
+              b.vx -= nx * rel * 0.5; b.vy -= ny * rel * 0.5;
+            }
+          }
+        }
+      }
+    }
+    fruits = fruits.filter(f => !f.dead).concat(born);
+
+    for (const f of fruits) {
+      if (f.age > 90 && f.y - TYPES[f.l].r < LINE && Math.abs(f.vy) < 1) {
+        state = "over";
+        tone(400, 80, 0.6, "sawtooth", 0.3, 0.01);
+        speakPhrase("Game over");
+        break;
+      }
+    }
+    for (const p of popups) { p.t++; p.y -= 0.6; }
+    popups = popups.filter(p => p.t < 70);
+  }
+
+  if (state === "launch") {
+    launchT++;
+    if (launchT >= LAUNCH) state = "play";
+  }
+
+  draw();
+  requestAnimationFrame(update);
+}
+
+// =====================================================
+//                       DRAW
+// =====================================================
+function drawFruit(x, y, l) {
+  const r = TYPES[l].r;
+  ctx.font = (r * 1.8) + "px Arial";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(TYPES[l].e, x, y + 2);
+}
+
+function drawGame() {
+  ctx.drawImage(bg, 0, 0, W, H);
+
+  ctx.strokeStyle = "#d32f2f";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([8, 8]);
+  ctx.beginPath(); ctx.moveTo(0, LINE); ctx.lineTo(W, LINE); ctx.stroke();
+  ctx.setLineDash([]);
+
+  for (const f of fruits) drawFruit(f.x, f.y, f.l);
+  if (canDrop && state === "play") drawFruit(cur.x, SPAWN_Y, cur.l);
+
+  for (const p of popups) {
+    ctx.globalAlpha = 1 - p.t / 70;
+    ctx.font = "bold 26px Arial";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.lineWidth = 5; ctx.strokeStyle = "#fff";
+    ctx.strokeText(p.text, p.x, p.y);
+    ctx.fillStyle = "#c2185b";
+    ctx.fillText(p.text, p.x, p.y);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.fillStyle = "#880e4f";
+  ctx.font = "bold 20px Arial";
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillText("Score: " + score, 10, 30);
+  drawIcons();
+
+  if (state === "over") {
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 34px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText("Game Over", W / 2, H / 2 - 10);
+    ctx.font = "20px Arial";
+    ctx.fillText("Score: " + score, W / 2, H / 2 + 24);
+    ctx.fillText("Dobara khelne ke liye tap karo", W / 2, H / 2 + 56);
+  }
+}
+
+function draw() {
+  if (state === "start") drawStart(0);
+  else if (state === "launch") drawStart(launchT / LAUNCH);
+  else drawGame();
+}
+update();
+</script>
+</body>
+</html>
+  
